@@ -1,0 +1,386 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=480">
+<style>
+html{
+  height:100%;
+  margin:0;
+  padding:0;
+}
+body{
+  position:relative;
+  height:100%;
+  margin:0;
+  padding:0;
+}
+#map{
+  display:block;
+  width:100%;
+  height:100%;
+  border:none;
+  margin:0;
+  padding:0;
+}
+#status{
+  position:absolute;
+  width:220px;
+  height:80px;
+  top:40px;
+  left:80px;
+  line-height:80px;
+  font-size:24px;
+  text-align: center;
+  background:rgba(0,0,0,0.6);
+  color:#fff;
+}
+#chatpane{
+  display:none;
+  position:absolute;
+  left:0;
+  top:0;
+  width:100%;
+  height:100%;
+  background:#888;
+  margin:0;
+  padding:0;
+  overflow:hidden;
+}
+#peervideo{
+  position:absolute;
+  border:4px solid #222;
+  background: #444;
+  box-sizing: border-box;
+  width:100%;
+  height:100%;
+  left:0px;
+}
+#myvideo{
+  position:absolute;
+  border:4px solid #222;
+  background: #444;
+  width:80px;
+  height:80px;
+  right:100px;
+  bottom:60px;
+}
+#overlay{
+  display:none;
+  position:absolute;
+  left:20%;
+  top:40%;
+  width:60%;
+  height:10vh;
+  line-height:10vh;
+  background:#fc3;
+  text-align: center;
+  font-size:3vw;
+}
+#callbtn{
+  display:none;
+  position:absolute;
+  border:2px solid #000;
+  top:45px;
+  right:20px;
+  width:100px;
+  height:100px;
+  font-size:20px;
+  border-radius:10px;
+  background:#8f8;
+}
+#hungupbtn{
+  position:absolute;
+  border:2px solid #000;
+  top:5px;
+  right:20px;
+  width:100px;
+  height:100px;
+  font-size:20px;
+  border-radius:10px;
+  background:#f88;
+}
+#camselvideobtn{
+  position:absolute;
+  border:1px solid #000;
+  bottom:60px;
+  left:20px;
+  width:80px;
+  height:80px;
+  background-color:#8f8;
+  background-image:url('images/selcam.svg');
+  background-size:100% 100%;
+  border-radius: 10px;
+}
+#camlaserbtn{
+  position:absolute;
+  bottom:60px;
+  left:120px;
+  border:1px solid #000;
+  width:80px;
+  height:80px;
+  background-color:#fff;
+  background-image:url('images/laser.svg');
+  background-size:100% 100%;
+  border-radius: 10px;
+}
+#campanvslider{
+  -webkit-appearance:none;
+  position:absolute;
+  border:1px solid #000;
+  background:linear-gradient(90deg,#aaa,#777);
+  bottom:60px;
+  right:70px;
+  height:50px;
+  width:200px;
+  border-radius: 10px;
+  transform-origin:right bottom;
+  transform:rotate(90deg);
+}
+#campanvslider::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  border:1px solid #000;
+  height:46px;
+  width:46px;
+  border-radius:23px;
+  background:radial-gradient(#fff,#888);
+}
+#campanhslider{
+  -webkit-appearance:none;
+  position:absolute;
+  background:linear-gradient(#aaa,#777);
+  border:1px solid #000;
+  bottom:0px;
+  left:20px;
+  height:50px;
+  width:81vw;
+  border-radius: 10px;
+}
+#campanhslider::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  border:1px solid #000;
+  height:46px;
+  width:46px;
+  background:radial-gradient(#fff,#888);
+  border-radius:23px;
+}
+</style>
+</head>
+<body>
+<script type="text/javascript" src="https://cdn.webrtc.ecl.ntt.com/skyway-latest.js"></script>
+<script>
+//let mapurl="https://m112.mbsrv.net/~svg2/devinfo/devkddi/lvl0.1/etcLayers/mashupDemo.html";
+let mapurl="https://www.svgmap.org/devinfo/devkddi/lvl0.1/etcLayers/mashupDemo.html";
+let dataurl="./data.php";
+let absdataurl="";
+
+let chat=null;
+let currentstat ={drive:-1,pid:""};
+let campanh=50,campanhsent=0;
+let campanv=50,campanvsent=0;
+let laserstate=0;
+let selvideo=1;
+
+function Chat() {
+  this.localStream = null;
+  this.conn=null;
+  peer = new Peer({
+    key: '<YOUR-API-KEY>',
+    debug: 3
+  });
+  peer.on('open', function(){
+    console.log("peer.open");
+  });
+  peer.on('error', function(err){
+    console.log("peer.error");
+    alert(err.message);
+  });
+  peer.on('close', function(){
+    console.log("peer.close");
+  });
+  peer.on('disconnected', ()=>{
+    console.log("peer.disconnected");
+    document.getElementById("chatpane").style.display="none";
+  });
+  this.hungup=()=>{
+    console.log("hungup");
+    document.getElementById("chatpane").style.display="none";
+    if(this.conn){
+      this.conn.close();
+      this.conn=null;
+    }
+    if(this.call){
+      this.call.close();
+      this.call=null;
+    }
+    let velm=document.getElementById("myvideo");
+    velm.srcObject=null;
+    if(this.localStream){
+      let tr=this.localStream.getTracks();
+      tr.forEach((track)=>{
+        track.stop();
+      });
+    }
+    this.camLaser(0);
+  }
+  this.callStart=()=>{
+    selvideo=1;
+    document.getElementById("camselvideobtn").style.backgroundColor=selvideo?"#8f8":"#f88";
+    laserstate=0;
+    document.getElementById("chatpane").style.display="block";
+    console.log("call to :"+currentstat.pid);
+
+    let constraint=
+      {
+        video:{ width: 160, height: 120, frameRate: 10 },
+        audio:true
+      };
+    if(navigator.userAgent.indexOf('iPhone') >= 0)
+      constraint=
+      {
+        // smaller than this size may be error on iPhone
+        video:{ width: 640, height: 480, frameRate: 10},
+        audio:true
+      }
+
+    navigator.mediaDevices.getUserMedia(
+      constraint
+    ).then((stream)=>{
+        let velm=document.getElementById("myvideo");
+        velm.srcObject = stream;
+        velm.play();
+        this.localStream = stream;
+        this.call=peer.call(currentstat.pid, stream);
+        this.call.on("stream",(strm)=>{
+          console.log(this.call.peer);
+          document.getElementById("peervideo").srcObject=strm;
+          document.getElementById("peervideo").play();
+        });
+        this.conn=peer.connect(currentstat.pid);
+      },
+      (err)=>{
+        alert(err);
+      }
+    );
+
+  }
+  this.camPanH=(val)=>{
+    campanh=val;
+  }
+  this.camPanV=(val)=>{
+    campanv=val;
+  }
+  this.camSelVideo=(n)=>{
+    if(n==undefined)
+      selvideo^=1;
+    else
+      selvideo=0;
+    document.getElementById("camselvideobtn").style.backgroundColor=selvideo?"#8f8":"#f88";
+    console.log("/selvideo:"+selvideo);
+    this.conn.send("/selvideo:"+selvideo+"\n");
+  }
+  this.camLaser=(n)=>{
+    if(n==undefined)
+      laserstate^=1;
+    else
+      laserstate=n;
+    console.log("/laser:"+laserstate);
+    if(this.conn)
+      this.conn.send("/laser:"+laserstate+"\n");
+    document.getElementById("camlaserbtn").style.backgroundColor=laserstate?"#f88":"#fff";
+  }
+  setInterval((()=>{
+    if(this.conn){
+      if(campanh!=campanhsent){
+        console.log("/panh:"+campanh);
+        this.conn.send("/panh:"+campanh+"\n");
+        campanhsent=campanh;
+      }
+      if(campanv!=campanvsent){
+        console.log("/panv:"+campanv);
+        this.conn.send("/panv:"+campanv+"\n");
+        campanvsent=campanv;
+      }
+    }
+  }).bind(this),50);
+}
+function setstat(s){
+  let st=document.getElementById("status");
+  let ov=document.getElementById("overlay");
+  let now=Date.now()/1000|0;
+  let status;
+  if(now-s.time>30)
+    s.drive=-1;
+  if(s.drive!=currentstat.drive||s.pid!=currentstat.pid){
+    switch(s.drive){
+    case -1:
+      ov.innerHTML="車載側システムが停止しました";
+      st.innerHTML="状態：待機中";
+      if(chat)
+        chat.hungup();
+      break;
+    case 0:
+      ov.innerHTML="車載側がP2Pモードになりました";
+      st.innerHTML="状態：P2P中";
+      if(chat)
+        chat.hungup();
+      break;
+    case 1:
+      ov.innerHTML="車載側が走行モードになりました";
+      st.innerHTML="状態：走行中";
+      break;
+    case 2:
+      ov.innerHTML="車載側が通話モードになりました";
+      st.innerHTML="状態：通話中";
+      break;
+    }
+    if(s.drive!=currentstat.drive)
+      ov.style.display="block";
+    currentstat=s;
+  }
+  else
+    ov.style.display="none";
+  document.getElementById("callbtn").style.display=(currentstat.drive==0)?"block":"none";
+}
+function Resize(){
+  let hsli=document.getElementById("campanhslider");
+  hsli.style.width=(window.innerWidth-40)+"px";
+  let vsli=document.getElementById("campanvslider");
+  vsli.style.width=Math.min(300,(window.innerHeight-200))+"px";
+}
+function Init(){
+  absdataurl=new URL(dataurl,location.href).href;
+  let mapreq=mapurl+"?data="+encodeURIComponent(absdataurl);
+  console.log(mapreq);
+  document.getElementById("map").src=mapreq;
+  Resize();
+  setInterval(()=>{
+    fetch(dataurl+"?cmd=getst").then((res)=>{
+      return res.text();
+    })
+    .then((txt)=>{
+      setstat(JSON.parse(txt));
+    });
+  },5000);
+  chat=new Chat();
+}
+window.onresize=Resize;
+window.onload=Init;
+</script>
+<iframe id="map" src="">
+</iframe>
+<!--<iframe id="map" src="./googlemap.html"></iframe>-->
+<div id="status"></div>
+<button id="callbtn" onclick="chat.callStart()">呼出</button>
+<div id="chatpane">
+  <video id="peervideo" width="320" height="240" autoplay playsinline></video>
+  <video id="myvideo" width="320" height="240" muted autoplay playsinline></video>
+  <input id="campanhslider" type="range" oninput="chat.camPanH(this.value)"/>
+  <input id="campanvslider" type="range" oninput="chat.camPanV(this.value)"/>
+  <button id="camselvideobtn" onclick="chat.camSelVideo()"></button>
+  <button id="camlaserbtn" onclick="chat.camLaser()"></button>
+  <button id="hungupbtn" onclick="chat.hungup()">切断</button>
+</div>
+<div id="overlay">走行中になりました</div>
+</body>
+</html>

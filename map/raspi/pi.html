@@ -1,0 +1,496 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html{
+  height:100%;
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
+}
+body{
+  height:100%;
+  margin:0;
+  padding:0;
+  position:relative;
+  box-sizing:border-box;
+  background: #444;
+}
+#status{
+  position:absolute;
+  right:10px;
+  bottom:10px;
+  width:30vw;
+  height:30vw;
+  font-size:4vw;
+  text-align: center;
+  line-height:10vh;
+  border-radius:20px;
+  box-sizing:border-box;
+}
+#peervideo{
+  display:none;
+  position:absolute;
+  border:4px solid #222;
+  background: #444;
+  width:100%;
+  height:100%;
+  top:0px;
+  left:0px;
+  box-sizing: border-box;
+}
+#overlay{
+  display:none;
+  position:absolute;
+  left:25%;
+  bottom:5vh;
+  width:50%;
+  height:10vh;
+  background:#fc3;
+  text-align: center;
+  line-height: 10vh;
+  font-size:3vw;
+}
+button{
+  position:absolute;
+  border:2px solid #000;
+}
+</style>
+</head>
+<body>
+<script type="text/javascript" src="https://cdn.webrtc.ecl.ntt.com/skyway-latest.js"></script>
+<script src="../polyfill/polyfill.js"></script>
+<script src="../drivers/i2c-ADT7410.js"></script>
+<script src="../drivers/i2c-PCA9685.js"></script>
+
+<script>
+const apiurl="https://www.g200kg.com/demo/2018/map3/data.php";  // url of api server
+const postinterval=300000;  // photo post interval (msec)
+
+let baseurl;
+let chat=null;
+let localStream=[null,null];
+let currentstat ={drive:-1,pid:""};
+let audioinputs=[];
+let videoinputs=[];
+let formData,request;
+let gps=null;
+let tempsensor=null;
+let servoMotor=null;
+
+// take a photo and send to api server
+function capture(strm){
+  console.log("capture");
+  let vt=strm.getVideoTracks()[0];
+  let ic = new ImageCapture(vt);
+  ic.takePhoto().then(blob =>{
+    let gpspos=gps.get();
+    strm.getTracks()[0].stop();
+    sendPicture(blob,gpspos.lat,gpspos.lng,tempSensor.get());
+  });
+}
+
+// laser functions
+function Laser(){
+  this.port=null;
+  this.ready=0;
+  this.v=0;
+  this.s=0;
+  if(navigator.requestGPIOAccess)
+    navigator.requestGPIOAccess().then((gpioAccess)=>{
+      this.port=gpioAccess.ports.get(26);
+      this.port.export("out").then(()=>{
+        this.ready=1;
+      });
+    });
+  this.set=(v)=>{
+    if(this.ready){
+      this.v=v;
+      this.port.write(v);
+    }
+  }
+  setInterval(()=>{
+    if(this.ready){
+      if(this.v==0)
+        this.port.write(0);
+      else
+        this.port.write(this.s^=1);
+    }
+  },200);
+}
+
+// temperature senser functions
+function TempSensor(i2cport) {
+  this.adt7410=new ADT7410(i2cport,0x48);
+  this.temp=0;
+  this.adt7410.init().then(()=>{
+    setInterval(()=>{
+      this.adt7410.read().then((value)=>{
+        this.temp=value;
+      })
+    },1000);
+  });
+  this.get=()=>{
+    return this.temp;
+  }
+}
+
+// servo functions
+function ServoMotor(i2cport){
+  this.pca9685=new PCA9685(i2cport,0x40);
+  this.angle=90;
+  this.current=90;
+  this.ready=0;
+  this.set=(angle)=>{
+    this.angle=angle;
+    if(this.ready){
+      // Drive servo directly when receive a command.
+      console.log("Servo:"+this.angle);
+      this.pca9685.setServo(0,this.angle);
+    }
+  }
+  this.pca9685.init(0.00050,0.00240,180).then(()=>{
+    this.pca9685.setServo(0,this.angle);
+    this.ready=1;
+  });
+/*
+Attempt to move the servo smoothly.
+But the timer does not run properly and it goes bankrupt.
+  setInterval(()=>{
+    if(this.ready&&this.angle!=this.current){
+      this.current=(this.current*4+this.angle)/5;//(this.angle-this.current)*0.5;
+      this.pca9685.setServo(0,this.current);
+    }
+  },50);
+*/
+}
+
+// GPS functions
+function Gps(){
+  //gprmc="$GPRMC,,V,,,,,,,,,,";
+  this.lat=35;
+  this.lng=139;
+  this.get=()=>{
+    return {lat:this.lat,lng:this.lng};
+  }
+  setInterval(()=>{
+    fetch("https://localhost/map/gps.txt").then((res)=>{
+      return res.text();
+    }).then((txt)=>{
+      let gprmc=txt;
+      let r=txt.split(",");
+      if(r[2]=="A"){
+        let latstr=r[3];
+        let lngstr=r[5];
+        this.lat=((latstr/100)|0)+((latstr/100)-((latstr/100)|0))/60*100;
+        this.lng=((lngstr/100)|0)+((lngstr/100)-((lngstr/100)|0))/60*100;
+      }
+    });
+  },1000);
+}
+
+// chat functions
+function Chat() {
+  this.videosel=1;
+  this.conn = null;
+  this.call = null;
+  this.mystream = [null,null];
+  this.selVideo=(v)=>{
+    this.call.replaceStream(this.mystream[v]);
+  }
+  this.peer = new Peer({
+    key: '<YOUR-API-KEY>',
+    debug: 3
+  });
+  this.peer.on('open', ()=>{
+    console.log(chat.peer.id);
+    sendStatus();
+  });
+  this.peer.on('error', (err)=>{
+    alert(err.message);
+  });
+  this.peer.on('connection', (conn)=>{
+    this.conn=conn;
+    this.conn.on('data',(data)=>{
+      console.log(data);
+      if(data.indexOf("/panh:")==0){
+        let angle=90+(50-data.slice(6));
+        servoMotor.set(angle);
+      }
+      else if(data.indexOf("/selvideo:")==0){
+        this.selVideo(data[10]);
+      }
+      else if(data.indexOf("/laser:")==0){
+        laser.set(data[7]);
+      }
+    });
+    this.conn.on('close',()=>{
+      console.log("conn close");
+      this.hungup();
+    })
+  });
+  this.peer.on("call", (call)=>{
+    if(currentstat.drive!=0)
+      return;
+    console.log("call from : ",this.call);
+    this.call=call;
+    document.getElementById("peervideo").style.display="block";
+    setStatus(2);
+    this.call.on("stream",(stream)=>{
+      console.log("STREAM:call",stream);
+      document.getElementById("peervideo").srcObject=stream;
+      document.getElementById("peervideo").play();
+    });
+    this.call.on("close",()=>{
+      console.log("CLOSE:call")
+      this.hungup();
+    });
+    this.call.on("removeStream",(strm)=>{
+      console.log("REMOVESTREAM:call",strm);
+    });
+    navigator.mediaDevices.getUserMedia({
+      video:{
+        deviceId: videoinputs[0].deviceId,
+        width:320,
+        height:240,
+        frameRate:10,
+      },
+      audio: {
+        deviceId: audioinputs[1].deviceId
+      }})
+      .then((stream)=>{
+        this.mystream[0]=stream;
+      }).catch(function (error) {
+        console.error('mediaDevice.getUserMedia() error:', error);
+        return;
+      }
+    );
+    navigator.mediaDevices.getUserMedia({
+      video:{
+        deviceId: videoinputs[1].deviceId,
+        width:320,
+        height:240,
+        frameRate:10,
+      },
+      audio: {
+        deviceId: audioinputs[1].deviceId
+      }})
+      .then((stream)=>{
+        this.mystream[1]=stream;
+//        this.call.answer(stream,{videoCodec:"H264"}); //Not work with Nexus5 chrome
+        this.call.answer(stream);
+        console.log("Answer");
+      }).catch(function (error) {
+        console.error('mediaDevice.getUserMedia() error:', error);
+        return;
+      }
+    );
+  });
+  this.peer.on('disconnected', ()=>{
+    console.log("disconnected");
+  });
+  this.hungup=()=>{
+    console.log("hungup");
+    if(this.call)
+      this.call.close();
+    document.getElementById("peervideo").style.display="none";
+    laser.set(0);
+    location.href=baseurl;
+  }
+}
+
+// send a picture to api server sub function
+function sendPicture(blob,lat,lng,tmp){
+  function dateString(){
+    let t=new Date();
+    return (t.getFullYear()+("0"+(t.getMonth()+1)).slice(-2)+("0"+t.getDate()).slice(-2)+("0"+t.getHours()).slice(-2)+("0"+t.getMinutes()).slice(-2)+("0"+t.getSeconds()).slice(-2));
+  }
+  if(lat==undefined)
+    lat=35.5;
+  if(lng==undefined)
+    lng=139.5;
+  if(tmp==undefined)
+    tmp=20;
+  console.log(blob);
+  formData = new FormData();
+  formData.append("cmd", "add");
+  formData.append("lat", lat);
+  formData.append("lng", lng);
+  formData.append("tmp", tmp);
+  formData.append("file", blob,"file.png");
+  request = new XMLHttpRequest();
+  request.open("POST", apiurl);
+  request.onloadend=(e)=>{
+    console.log(request.response);
+    location.href=baseurl+"?drive=1";
+  };
+  request.send(formData);
+}
+
+// send current status {drive, pid, time, lat, lng} to api server
+function sendStatus(){
+  if(!chat)
+    return;
+  let gpspos=gps.get();
+  formData = new FormData();
+  formData.append("drive", currentstat.drive);
+  formData.append("pid",chat.peer.id);
+  formData.append("time",(Date.now()/1000)|0);
+  formData.append("lat",gpspos.lat);
+  formData.append("lng",gpspos.lng);
+  request = new XMLHttpRequest();
+  request.open("POST", apiurl+"?cmd=setst");
+  request.onreadystatechange=(e)=>{
+    console.log(request.response);
+  };
+  request.send(formData);
+  console.log("sendStatus");
+}
+
+// set drive mode
+function setStatus(s){
+  console.log("setStatus");
+  let dr;
+  if(s==undefined){
+    switch(currentstat.drive){
+    case 0:
+      dr=1;
+      break;
+    case 1:
+      dr=0;
+      break;
+    case 2:
+      break;
+    }
+  }
+  else {
+    dr=s;
+  }
+  let ov=document.getElementById("overlay");
+  let st=document.getElementById("status");
+  let vd=document.getElementById("peervideo");
+  if(dr==0&&currentstat.drive!=0){
+    console.log(videoinputs[1]);
+    navigator.mediaDevices.getUserMedia({
+      video:{
+        deviceId:videoinputs[1].deviceId,
+        width:320,
+        height:240,
+        frameRate:5
+      },
+      audio:false
+    }).then((strm)=>{
+      console.log("p2pstrm",strm);
+      vd.style.display="block";
+      vd.srcObject=strm;
+      vd.play();
+    })
+  }
+  if(currentstat.drive==0&&dr!=0){
+    if(vd.srcObject){
+//      vd.srcObject.getTracks()[0].stop();
+      vd.srcObject=null;
+    }
+  }
+  currentstat.drive=dr;
+  sendStatus();
+  switch(currentstat.drive){
+  case 0:
+    ov.innerHTML="P2Pモードになりました";
+    st.innerHTML="P2P中";
+    st.style.background="#8f8";
+    st.style.display="block";
+    break;
+  case 1:
+    ov.innerHTML="走行中になりました";
+    st.innerHTML="走行中";
+    st.style.background="#f88";
+    st.style.display="block";
+    break;
+  case 2:
+    ov.innerHTML="通話中になりました";
+    st.innerHTML="通話中";
+    st.style.display="none";
+    break;
+  }
+  ov.style.display="block";
+  setTimeout(()=>{ov.style.display="none"},3000);
+}
+
+// initialize
+function Init(){
+  console.log("init");
+  let params=location.search.slice(1).split("&").map(p=>p.split("="));
+  baseurl=location.href.replace(/\?.*/,"");
+  navigator.mediaDevices.enumerateDevices().then(
+    devices=>{
+      devices.forEach(function(device) {
+        if(device.kind=="audioinput")
+          audioinputs.push(device);
+        if(device.kind=="videoinput")
+          videoinputs.push(device);
+      });
+      console.log("video",videoinputs);
+      console.log("audio",audioinputs);
+
+      //workaround for logicool cam, dummy read. but is not effective.
+/*
+      navigator.mediaDevices.getUserMedia({
+        video:{
+          deviceId:videoinputs[1].deviceId,
+        },
+        audio:false
+      }).then((strm)=>{console.log(strm);});
+*/
+      setStatus(location.search.indexOf("drive=1")>0?1:0);
+      chat = new Chat();
+    }
+  );
+  console.log("I2CAccess");
+  if(navigator.requestI2CAccess)
+    navigator.requestI2CAccess().then((i2cAccess)=>{
+      console.log("i2cAccess:",i2cAccess);
+      let port = i2cAccess.ports.get(1);
+      console.log(port);
+      tempSensor = new TempSensor(port);
+      servoMotor = new ServoMotor(port);
+    });
+  laser=new Laser();
+  gps=new Gps();
+  if(postinterval>0){
+    setInterval(()=>{
+      if(currentstat.drive==1){
+        navigator.mediaDevices.getUserMedia({
+          video:{
+            deviceId: videoinputs[0].deviceId,
+            width:640,
+            height:480,
+            frameRate:10,
+          },
+          audio: false})
+          .then((stream)=>{
+            let blob=capture(stream);
+          }).catch(function (error) {
+            console.error('mediaDevice.getUserMedia() error:', error);
+            return;
+          }
+        );
+      }
+    },postinterval);
+  }
+  setInterval(()=>{
+    sendStatus();
+  },10000);
+}
+window.onload=Init;
+</script>
+<!--<iframe id="map" src="https://m112.mbsrv.net/~svg2/devinfo/devkddi/lvl0.1/etcLayers/mashupDemo.html">
+</iframe>-->
+<!--<iframe id="map" src="./googlemap.html"></iframe>-->
+
+  <video id="peervideo" width="320" height="240"></video>
+  <button id="status" onclick="setStatus()" style="background:#8f8">P2P中</button>
+  <div id="overlay">走行中になりました</div>
+</body>
+</html>
